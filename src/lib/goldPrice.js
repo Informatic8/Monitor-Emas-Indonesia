@@ -79,13 +79,14 @@ async function fetchMaulanarGoldPrice(previousPrice = null) {
  * Referensi: harga spot global mirip dengan platform seperti Pluang (https://pluang.com/asset/gold)
  */
 async function fetchRealGoldPrice(previousPrice = null) {
-  const [goldRes, rateRes] = await Promise.all([
-    fetch('https://data-asg.goldprice.org/dbXRates/USD', { cache: 'no-store' }),
-    fetch('https://open.er-api.com/v6/latest/USD', { cache: 'no-store' }),
-  ])
-  if (!goldRes.ok || !rateRes.ok) return null
-  const gold = await goldRes.json()
-  const rate = await rateRes.json()
+  try {
+    const [goldRes, rateRes] = await Promise.all([
+      fetch('https://data-asg.goldprice.org/dbXRates/USD', { cache: 'no-store' }),
+      fetch('https://open.er-api.com/v6/latest/USD', { cache: 'no-store' }),
+    ])
+    if (!goldRes.ok || !rateRes.ok) return null
+    const gold = await goldRes.json()
+    const rate = await rateRes.json()
   const xauPrice = gold?.items?.[0]?.xauPrice
   const xauClose = gold?.items?.[0]?.xauClose
   const usdToIdr = rate?.rates?.IDR
@@ -107,6 +108,9 @@ async function fetchRealGoldPrice(previousPrice = null) {
     dailyHigh,
     dailyLow,
     timestamp: new Date().toISOString(),
+  }
+  } catch {
+    return null
   }
 }
 
