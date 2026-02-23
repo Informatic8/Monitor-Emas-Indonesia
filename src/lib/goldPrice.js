@@ -8,6 +8,35 @@
 
 const GRAMS_PER_TROY_OZ = 31.1035
 const REFRESH_MS = 5000
+const CACHE_TTL_MS = 30000 // Cache 30 detik untuk kurangi request
+
+/**
+ * Cache sederhana di localStorage untuk kurangi request API
+ */
+const cache = {
+  get(key) {
+    try {
+      const item = localStorage.getItem(`gold_${key}`)
+      if (!item) return null
+      const { value, expiry } = JSON.parse(item)
+      if (Date.now() > expiry) {
+        localStorage.removeItem(`gold_${key}`)
+        return null
+      }
+      return value
+    } catch {
+      return null
+    }
+  },
+  set(key, value, ttl = CACHE_TTL_MS) {
+    try {
+      localStorage.setItem(
+        `gold_${key}`,
+        JSON.stringify({ value, expiry: Date.now() + ttl })
+      )
+    } catch {}
+  },
+}
 
 /**
  * Format angka ke Rupiah Indonesia
@@ -75,16 +104,73 @@ async function fetchMaulanarGoldPrice(previousPrice = null) {
 }
 
 /**
+ * api.gold-api.com - FREE, no API key, no rate limit
+ */
+async function fetchGoldApiCom(previousPrice = null) {
+  const cacheKey = 'gold_api_com'
+  const cached = cache.get(cacheKey)
+  if (cached) return cached
+
+  try {
+    // Coba endpoint price langsung
+    const res = await fetch('https://api.gold-api.com/price/XAU/USD', {
+      cache: 'no-store',
+      headers: { Accept: 'application/json' },
+    })
+    if (!res.ok) {
+      // Jika 429 (rate limit) atau error, skip
+      if (res.status === 429) return null
+      return null
+    }
+    const data = await res.json()
+    const pricePerOzUSD = data.price || data.close || data.value
+    if (pricePerOzUSD == null) return null
+
+    // Ambil kurs USD/IDR
+    const rateRes = await fetch('https://open.er-api.com/v6/latest/USD', { cache: 'no-store' })
+    if (!rateRes.ok) return null
+    const rate = await rateRes.json()
+    const usdToIdr = rate?.rates?.IDR
+    if (usdToIdr == null) return null
+
+    const pricePerGram = Math.round((pricePerOzUSD * usdToIdr) / GRAMS_PER_TROY_OZ)
+    const sellPrice = Math.round(pricePerGram * 1.02)
+    const buyBackPrice = Math.round(pricePerGram * 0.98)
+    const result = {
+      pricePerGram,
+      sellPrice,
+      buyBackPrice,
+      previousPrice: previousPrice ?? pricePerGram,
+      dailyHigh: Math.round(pricePerGram * 1.005),
+      dailyLow: Math.round(pricePerGram * 0.995),
+      timestamp: new Date().toISOString(),
+    }
+    cache.set(cacheKey, result)
+    return result
+  } catch {
+    return null
+  }
+}
+
+/**
  * Harga emas real: goldprice.org (USD/oz) + kurs USD/IDR
  * Referensi: harga spot global mirip dengan platform seperti Pluang (https://pluang.com/asset/gold)
  */
 async function fetchRealGoldPrice(previousPrice = null) {
+  const cacheKey = 'gold_real'
+  const cached = cache.get(cacheKey)
+  if (cached) return cached
+
   try {
     const [goldRes, rateRes] = await Promise.all([
       fetch('https://data-asg.goldprice.org/dbXRates/USD', { cache: 'no-store' }),
       fetch('https://open.er-api.com/v6/latest/USD', { cache: 'no-store' }),
     ])
-    if (!goldRes.ok || !rateRes.ok) return null
+    if (!goldRes.ok || !rateRes.ok) {
+      // Jika rate limit (429), return null agar bisa coba API lain
+      if (goldRes.status === 429 || rateRes.status === 429) return null
+      return null
+    }
     const gold = await goldRes.json()
     const rate = await rateRes.json()
   const xauPrice = gold?.items?.[0]?.xauPrice
@@ -100,15 +186,17 @@ async function fetchRealGoldPrice(previousPrice = null) {
   const sellPrice = Math.round(pricePerGram * 1.02)
   const buyBackPrice = Math.round(pricePerGram * 0.98)
 
-  return {
-    pricePerGram,
-    sellPrice,
-    buyBackPrice,
-    previousPrice: prevGram,
-    dailyHigh,
-    dailyLow,
-    timestamp: new Date().toISOString(),
-  }
+    const result = {
+      pricePerGram,
+      sellPrice,
+      buyBackPrice,
+      previousPrice: prevGram,
+      dailyHigh,
+      dailyLow,
+      timestamp: new Date().toISOString(),
+    }
+    cache.set(cacheKey, result)
+    return result
   } catch {
     return null
   }
@@ -170,22 +258,34 @@ async function fetchMockGoldPrice(previousPrice = null) {
 }
 
 /**
- * Ambil harga emas: coba maulanar → real → GoldAPI → mock
+ * Ambil harga emas dengan rotasi otomatis & caching:
+ * 1. api.gold-api.com (FREE, no limit) ← TAMBAHAN BARU
+ * 2. emas.maulanar.my.id
+ * 3. goldprice.org + exchangerate (dengan cache)
+ * 4. GoldAPI.io (jika ada API key)
+ * 5. Mock (fallback terakhir)
  */
 export async function fetchGoldPrice({ apiKey, previousPrice } = {}) {
-  // Prioritas 1: emas.maulanar.my.id
+  // Prioritas 1: api.gold-api.com (FREE, no rate limit, no API key)
+  const goldApiCom = await fetchGoldApiCom(previousPrice)
+  if (goldApiCom) return goldApiCom
+
+  // Prioritas 2: emas.maulanar.my.id
   const maulanar = await fetchMaulanarGoldPrice(previousPrice)
   if (maulanar) return maulanar
-  // Prioritas 2: GoldAPI.io (jika ada API key)
+
+  // Prioritas 3: goldprice.org + exchangerate (dengan cache 30 detik)
+  const real = await fetchRealGoldPrice(previousPrice)
+  if (real) return real
+
+  // Prioritas 4: GoldAPI.io (jika ada API key)
   const fromGoldAPI = apiKey || import.meta.env.VITE_GOLD_API_KEY
   if (fromGoldAPI) {
     const r = await fetchGoldAPI(fromGoldAPI)
     if (r) return r
   }
-  // Prioritas 3: goldprice.org + exchangerate
-  const real = await fetchRealGoldPrice(previousPrice)
-  if (real) return real
-  // Fallback: mock
+
+  // Fallback: mock (selalu tersedia)
   return fetchMockGoldPrice(previousPrice)
 }
 
