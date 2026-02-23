@@ -173,7 +173,7 @@ function useGoldPrice(apiKey = null) {
       })
       setData(result)
     } catch (e) {
-      setError(e.message)
+      setError(e.message || 'Gagal mengambil data harga emas')
     } finally {
       setLoading(false)
     }
